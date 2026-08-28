@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Literal
+
+import httpx
 
 Role = Literal["eval", "execute"]
 
@@ -49,6 +52,31 @@ def llm_available() -> bool:
     return bool(load_llm_config()["api_key"])
 
 
+def _needs_openai_response_compat(base_url: str) -> bool:
+    """Some OpenAI-compatible proxies omit required fields (e.g. object=chat.completion)."""
+    if os.environ.get("PE_LLM_OPENAI_COMPAT", "").lower() in ("1", "true", "yes"):
+        return True
+    host = base_url.lower()
+    return "nocsdn.com" in host or "copilot-api" in host
+
+
+async def _patch_openai_chat_completion_response(response: httpx.Response) -> None:
+    if "/chat/completions" not in str(response.url):
+        return
+    await response.aread()
+    try:
+        data = json.loads(response.content)
+    except json.JSONDecodeError:
+        return
+    if data.get("object") is None and "choices" in data:
+        data["object"] = "chat.completion"
+        response._content = json.dumps(data).encode("utf-8")
+
+
+def _openai_compat_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(event_hooks={"response": [_patch_openai_chat_completion_response]})
+
+
 def build_pe_model(cfg: dict[str, str]):
     """Build a pydantic-ai model from planner-exec LLM config."""
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -67,12 +95,15 @@ def build_pe_model(cfg: dict[str, str]):
             pass
 
     api_key = cfg["api_key"] or "placeholder"
+    provider_kwargs: dict[str, Any] = {
+        "base_url": cfg["base_url"],
+        "api_key": api_key,
+    }
+    if _needs_openai_response_compat(cfg["base_url"]):
+        provider_kwargs["http_client"] = _openai_compat_http_client()
     return OpenAIChatModel(
         cfg["model"],
-        provider=OpenAIProvider(
-            base_url=cfg["base_url"],
-            api_key=api_key,
-        ),
+        provider=OpenAIProvider(**provider_kwargs),
     )
 
 
