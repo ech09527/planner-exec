@@ -250,6 +250,13 @@ def _usage_limits() -> UsageLimits:
     return UsageLimits(request_limit=DEFAULT_MAX_STEPS, tool_calls_limit=DEFAULT_MAX_STEPS * 3)
 
 
+def _run_usage_dump(result: Any) -> dict[str, Any]:
+    usage = result.usage() if callable(getattr(result, "usage", None)) else result.usage
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    return {}
+
+
 def _trace_messages(deps: AgentDeps, messages: list[Any], role: str) -> None:
     if not TRACE_MESSAGES:
         return
@@ -332,13 +339,13 @@ def evaluate_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
             {
                 "passed": out.passed,
                 "issue_count": len(out.issues),
-                "usage": result.usage().model_dump() if hasattr(result.usage(), "model_dump") else str(result.usage()),
+                "usage": _run_usage_dump(result),
             },
         )
         if task_id:
             from .pe_token import record_internal_llm_from_usage
 
-            usage = result.usage().model_dump() if hasattr(result.usage(), "model_dump") else {}
+            usage = _run_usage_dump(result)
             record_internal_llm_from_usage(
                 task_id,
                 "validate",
@@ -416,13 +423,13 @@ def execute_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
                 "status": out.status,
                 "summary": out.summary,
                 "action_count": len(deps.action_log),
-                "usage": result.usage().model_dump() if hasattr(result.usage(), "model_dump") else str(result.usage()),
+                "usage": _run_usage_dump(result),
             },
         )
         if task_id:
             from .pe_token import record_internal_llm_from_usage
 
-            usage = result.usage().model_dump() if hasattr(result.usage(), "model_dump") else {}
+            usage = _run_usage_dump(result)
             record_internal_llm_from_usage(
                 task_id,
                 "execute",
