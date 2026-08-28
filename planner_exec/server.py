@@ -18,6 +18,11 @@ from mcp.server.mcpserver import MCPServer
 
 from planner_exec import pe_cli as pe
 from planner_exec.pe_mcp import debug_tools_enabled, observe_tools_enabled
+from planner_exec.pe_prompts import (
+    plan_design_guide_text,
+    plan_example_calc_text,
+    replan_guide_text,
+)
 
 
 def _run_pe(func, args) -> str:
@@ -28,20 +33,21 @@ def _run_pe(func, args) -> str:
 
 
 SERVER_INSTRUCTIONS = """
-Planner-Exec MCP — 主 Agent 规划，MCP 内 pydantic-ai 验证与执行
+Planner-Exec：你规划，MCP 内 cheap LLM 按 phase DAG 在 workspace 执行。
 
-Core 工具（5 个）：
-1. planner_plan — 一次提交 goal + phases + dags，返回 task_id + summary（勿复述 nodes）
-2. planner_run — 跑任务；phase=N 只跑单 phase
-3. planner_status — 进度 + session + recommended_next
-4. planner_replan — 无 patches 返回重规划包；有 patches 则 apply
-5. planner_query_logs — 日志（limit=20，勿 detail=true）
+Core 工具：planner_plan → planner_run → planner_status / planner_query_logs
+blocked：planner_replan（无 patches 拿包）→ replan(patches=...) → run
 
-推荐流程：
-plan → run → [blocked] replan → replan(patches=...) → run
+硬约束（违反会 eval/run 失败）：
+- plan 一次提交 goal + goal_confirmed + phases + dags[{phase, nodes[]}]
+- reads_from 仅同 phase 内 node id；跨 phase 用 phases.inputs/outputs
+- node description 写「执行阶段将做什么」，勿写 workspace 文件是否已存在
+- 集成 shell/unittest 放该 phase 最后一节点；中间节点优先 file_exists
+- planner_plan 后勿复述 nodes[]；≥3 节点或多 phase 用 mechanical_only=true
+- query_logs limit=20，勿 detail=true
 
-plan 包需含：goal, goal_confirmed, phases, dags[{phase, nodes[]}]
-init/save 在 PE_MCP_OBSERVE_TOOLS=1 下可用（增量修改）。
+规划前 get prompt「plan-design-guide」；需要结构参考 get「plan-example-calc」；
+blocked 时 get「replan-guide」。init/save 仅在 PE_MCP_OBSERVE_TOOLS=1。
 """.strip()
 
 server = MCPServer(
@@ -60,6 +66,7 @@ server = MCPServer(
     name="planner_plan",
     description=(
         "Create task and save goal-confirmed + phases + all phase DAGs atomically. "
+        "Before first plan, get MCP prompt plan-design-guide. "
         "Returns slim summary only (no full nodes[]). Use validate_only to check without writing."
     ),
 )
@@ -92,7 +99,10 @@ def planner_plan(
 
 @server.tool(
     name="planner_run",
-    description="Run task (all phases) or single phase if phase is set. Default slim response.",
+    description=(
+        "Run task (all phases) or single phase if phase is set. "
+        "Use mechanical_only=true for multi-node or multi-phase plans. Default slim response."
+    ),
 )
 def planner_run(
     task_id: str,
@@ -399,6 +409,34 @@ def _register_debug_tools() -> None:
     def planner_next_node(task_id: str, phase: int) -> str:
         return _run_pe(pe.cmd_next_node, argparse.Namespace(task_id=task_id, phase=phase))
 
+
+def _register_prompts() -> None:
+    @server.prompt(
+        name="plan-design-guide",
+        title="Plan design guide",
+        description="Phase/DAG/node schema and pre-submit checklist for planner_plan.",
+    )
+    def plan_design_guide() -> str:
+        return plan_design_guide_text()
+
+    @server.prompt(
+        name="plan-example-calc",
+        title="Plan example: calc package",
+        description="Reference plan JSON (2 phases / 6 nodes). Adapt goal to your task.",
+    )
+    def plan_example_calc() -> str:
+        return plan_example_calc_text()
+
+    @server.prompt(
+        name="replan-guide",
+        title="Replan after blocked",
+        description="When planner_run returns blocked: replan packet, patches, and common fixes.",
+    )
+    def replan_guide() -> str:
+        return replan_guide_text()
+
+
+_register_prompts()
 
 if observe_tools_enabled():
     _register_observe_tools()

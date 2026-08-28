@@ -71,6 +71,18 @@ planner_plan(plan={goal, goal_confirmed, phases, dags})
 
 `planner_eval_*`, `planner_execute_node`, `planner_next_node`
 
+## MCP Prompts
+
+Prompt **不会**自动注入，规划前需 `prompts/get`（或在 Host UI 选择）：
+
+| Prompt | 何时 get |
+|--------|----------|
+| `plan-design-guide` | 首次 `planner_plan` 前（phase/DAG/node 规则 + 自检清单） |
+| `plan-example-calc` | 需要结构参考时（2 phase / 6 nodes 示例 JSON） |
+| `replan-guide` | `planner_run` 返回 blocked 后 |
+
+`SERVER_INSTRUCTIONS` 含硬约束与流程；详细指南在上表 Prompt 中。
+
 ## Host 契约
 
 项目根目录 [`CLAUDE.md`](CLAUDE.md) 含主 Agent token 规则。架构详见 [`docs/token-budget.md`](docs/token-budget.md)。
