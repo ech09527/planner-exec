@@ -16,7 +16,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from planner_exec import pe
+from planner_exec import pe_cli as pe
 from planner_exec.pe_mcp import debug_tools_enabled, observe_tools_enabled
 
 
