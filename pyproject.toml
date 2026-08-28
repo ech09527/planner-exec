@@ -1,6 +1,6 @@
 [project]
 name = "planner-exec"
-version = "0.3.0"
+version = "0.5.0"
 description = "MCP server: premium agent plans, cheap LLM executes phase DAGs"
 readme = "README.md"
 requires-python = ">=3.12"

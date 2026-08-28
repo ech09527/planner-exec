@@ -51,7 +51,7 @@ def fetch_hints(payload: dict[str, Any], truncated_fields: list[str]) -> list[di
     if "progress" in truncated_fields:
         hints.append({"tool": "planner_status", "params": {"task_id": task_id}})
     if payload.get("status") == "blocked":
-        hints.append({"tool": "planner_replan_packet", "params": {"task_id": task_id}})
+        hints.append({"tool": "planner_replan", "params": {"task_id": task_id}})
     return hints
 
 

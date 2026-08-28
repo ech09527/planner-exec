@@ -224,7 +224,7 @@ def test_budget_blocked_hint():
     from planner_exec.pe_budget import fetch_hints
 
     hints = fetch_hints({"task_id": "t1", "status": "blocked"}, [])
-    assert any(h["tool"] == "planner_replan_packet" for h in hints)
+    assert any(h["tool"] == "planner_replan" for h in hints)
 
 
 def test_session_poll_simulation(temp_db):
@@ -264,7 +264,7 @@ def test_session_get_set_and_recommended_next(temp_db):
         increment_poll=True,
     )
     assert view["session"]["poll_count"] == 1
-    assert view["recommended_next"] == "planner_replan_packet"
+    assert view["recommended_next"] == "planner_replan"
 
     again = get_session_view(task_id)
     assert again["session"]["last_since"] == "2026-08-28T00:00:01Z"

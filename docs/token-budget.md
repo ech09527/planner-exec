@@ -9,10 +9,7 @@ Planner-exec 通过三层机制降低主 Agent 的 MCP 返回 token 成本。
   │ 只持有 task_id + session 指针
   ▼
 MCP Core Tools
-  ├── run_task / run_phase   → 瘦返回 + _budget
-  ├── replan_packet          → 失败时 <500 token 重规划包
-  ├── patch_node             → 增量改 DAG
-  ├── query_logs             → 默认 limit=20
+  ├── run / status / replan / query_logs
   └── token_report           → 用量分离报告
   ▼
 SQLite (planner.db)

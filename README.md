@@ -6,7 +6,7 @@
 
 | 层级 | 谁 | 做什么 |
 |------|-----|--------|
-| 规划 | 主 Agent | `planner_init` → `planner_save` 目标/阶段/DAG |
+| 规划 | 主 Agent | `planner_plan` 一次提交 goal/phases/dags |
 | 执行 | MCP pydantic-ai | `planner_run_phase` / `planner_run_task` |
 | 重规划 | 主 Agent | `planner_query_logs` → 修订 DAG |
 
@@ -46,31 +46,30 @@ export PE_CHARS_PER_TOKEN=4         # token 估算（C2 token_ledger 使用）
 ## 推荐工作流
 
 ```
-planner_init → planner_save(goal/phases/dag)
-→ planner_run_task(task_id)           # 或 planner_run_phase
-→ planner_status / planner_query_logs(since=...)  # 长跑时轮询；失败时 failures_only
+planner_plan(plan={goal, goal_confirmed, phases, dags})
+→ planner_run(task_id)
+→ planner_status / planner_query_logs(since=...)
 ```
 
-## MCP 工具（主要）
+## MCP 工具
 
-**Core（默认注册）：** `planner_init`, `planner_save`, `planner_run_task`, `planner_run_phase`, `planner_status`, `planner_query_logs`, `planner_replan_packet`, `planner_patch_node`, `planner_token_report`, `planner_session_get`, `planner_session_set`
+### Core（默认 5 个）
 
 | 工具 | 用途 |
 |------|------|
-| `planner_init` | 新建任务 |
-| `planner_save` | 保存 goal / phases / dag |
-| `planner_run_task` | 跑完全部 phase（默认瘦返回 + `_budget`） |
-| `planner_run_phase` | 跑单个 phase（默认无 `steps[]`） |
-| `planner_status` | 阶段进度 + 最近事件（适合轮询） |
-| `planner_query_logs` | 执行日志 + replan_hints；支持 `since` / `failures_only`（默认 limit=20） |
-| `planner_replan_packet` | escalation 后最小重规划包（<500 token 目标） |
-| `planner_patch_node` | DAG 增量修改（`replace` / `insert_after` / `delete`） |
-| `planner_token_report` | MCP 返回 vs 内部 LLM 用量报告 |
-| `planner_session_get/set` | Host 会话指针外置 + `recommended_next` |
+| `planner_plan` | 一次提交规划，返回 task_id + summary |
+| `planner_run` | 跑全任务；`phase=N` 跑单 phase |
+| `planner_status` | 进度 + session + `recommended_next` |
+| `planner_replan` | 重规划包 或 应用 patches |
+| `planner_query_logs` | 日志（默认 limit=20） |
 
-**Observe（`PE_MCP_OBSERVE_TOOLS=1`）：** `planner_list`, `planner_migrate`, `planner_show`, `planner_progress`
+### Observe（`PE_MCP_OBSERVE_TOOLS=1`）
 
-**Debug（`PE_MCP_DEBUG_TOOLS=1`）：** `planner_eval_node`, `planner_execute_node`, `planner_next_node`, `planner_eval_phase`, `planner_eval_status`
+`planner_init`, `planner_save`, `planner_list`, `planner_show`, `planner_progress`, `planner_migrate`, `planner_token_report`, legacy 别名
+
+### Debug（`PE_MCP_DEBUG_TOOLS=1`）
+
+`planner_eval_*`, `planner_execute_node`, `planner_next_node`
 
 ## Host 契约
 
@@ -79,10 +78,9 @@ planner_init → planner_save(goal/phases/dag)
 ## CLI
 
 ```bash
-.venv/bin/python -m planner_exec.pe run-task --task-id XXX
-.venv/bin/python -m planner_exec.pe status --task-id XXX
-.venv/bin/python -m planner_exec.pe query-logs --task-id XXX
-.venv/bin/python -m planner_exec.pe replan-packet --task-id XXX
-.venv/bin/python -m planner_exec.pe patch-node --task-id XXX --phase 1 --data '{"patches":[...]}'
-.venv/bin/python -m planner_exec.pe token-report --task-id XXX
+.venv/bin/python -m planner_exec.pe plan --plan-file plan.json --workspace /path/to/ws
+.venv/bin/python -m planner_exec.pe run --task-id XXX
+.venv/bin/python -m planner_exec.pe status --task-id XXX --increment-poll
+.venv/bin/python -m planner_exec.pe replan --task-id XXX
+.venv/bin/python -m planner_exec.pe replan --task-id XXX --phase 1 --data '{"patches":[...]}'
 ```

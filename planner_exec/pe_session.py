@@ -18,7 +18,7 @@ def recommended_next(task_id: str, session: dict[str, Any] | None) -> str:
     if db.get_latest_escalation(task_id) or any(
         marker in status for marker in ("blocked", "failed", "escalat", "eval_failed", "execute_failed")
     ):
-        return "planner_replan_packet"
+        return "planner_replan"
 
     if db.is_task_running(task_id):
         if poll_count < 60:
