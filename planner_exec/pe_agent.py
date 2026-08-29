@@ -61,6 +61,8 @@ class AgentDeps:
     workspace: str | None = None
     upstream_nodes: dict[str, Any] = field(default_factory=dict)
     action_log: list[dict[str, Any]] = field(default_factory=list)
+    recent_tool_keys: list[str] = field(default_factory=list)
+    stop_requested: bool = False
     _step: int = 0
 
     def trace(self, event_type: str, data: dict[str, Any]) -> None:
@@ -77,6 +79,75 @@ class AgentDeps:
             node_id=self.node_id,
             step=self._step,
         )
+
+
+TOOL_REPEAT_LIMIT = int(os.environ.get("PE_AGENT_TOOL_REPEAT_LIMIT", "3"))
+
+_MISSING_WORKSPACE_MARKERS = (
+    "file not found",
+    "not a directory",
+    "no such file",
+    "不存在",
+    "尚未",
+    "workspace 为空",
+    "workspace is empty",
+    "目录不存在",
+    "无 calc",
+    "empty workspace",
+)
+
+
+def classify_agent_failure(exc: BaseException | str) -> str:
+    text = str(exc).lower()
+    if any(x in text for x in ("request_limit", "usage limit", "tool_calls_limit", "exceed the request")):
+        return "agent_step_limit"
+    if any(x in text for x in ("429", "rate limit", "too many requests")):
+        return "llm_rate_limited"
+    if any(x in text for x in ("api key", "authentication", "401", "unauthorized", "no llm")):
+        return "llm_unavailable"
+    return "agent_error"
+
+
+def _is_missing_workspace_issue(message: str) -> bool:
+    m = message.lower()
+    return any(marker in m for marker in _MISSING_WORKSPACE_MARKERS)
+
+
+def _filter_validate_issues(issues: list[EvalIssue]) -> tuple[list[EvalIssue], bool]:
+    """Downgrade pre-execute workspace-missing blockers to warnings."""
+    filtered: list[EvalIssue] = []
+    for issue in issues:
+        if issue.severity == "blocker" and _is_missing_workspace_issue(issue.message):
+            filtered.append(
+                EvalIssue(
+                    severity="warning",
+                    type="workspace_pre_execute",
+                    message=f"{issue.message} （忽略：eval 在 execute 前运行，产物尚未创建是正常的）",
+                )
+            )
+        else:
+            filtered.append(issue)
+    passed = not any(i.severity == "blocker" for i in filtered)
+    return filtered, passed
+
+
+def _check_tool_repeat(deps: AgentDeps, tool: str, **parts: Any) -> str | None:
+    key = tool + "|" + "|".join(f"{k}={parts[k]}" for k in sorted(parts))
+    deps.recent_tool_keys.append(key)
+    n = 0
+    for prev in reversed(deps.recent_tool_keys):
+        if prev == key:
+            n += 1
+        else:
+            break
+    if n >= TOOL_REPEAT_LIMIT:
+        deps.stop_requested = True
+        return (
+            f"STOP: repeated {tool}({parts}) {n} times. "
+            "Do NOT call this tool again. Return your final structured result NOW."
+        )
+    return None
+
 
 def _workspace_root(ctx: RunContext[AgentDeps]) -> Path:
     if not ctx.deps.workspace:
@@ -98,6 +169,10 @@ def _register_read_tools(agent: Agent[AgentDeps, Any]) -> None:
     @agent.tool
     def read_file(ctx: RunContext[AgentDeps], path: str) -> str:
         """Read a UTF-8 text file relative to workspace."""
+        stop = _check_tool_repeat(ctx.deps, "read_file", path=path)
+        if stop:
+            ctx.deps.trace("tool", {"tool": "read_file", "path": path, "ok": False, "error": stop, "repeat_stop": True})
+            return stop
         try:
             target = _safe_path(_workspace_root(ctx), path)
             if not target.is_file():
@@ -117,6 +192,10 @@ def _register_read_tools(agent: Agent[AgentDeps, Any]) -> None:
     @agent.tool
     def list_dir(ctx: RunContext[AgentDeps], path: str = ".") -> str:
         """List files and directories under a workspace-relative path."""
+        stop = _check_tool_repeat(ctx.deps, "list_dir", path=path)
+        if stop:
+            ctx.deps.trace("tool", {"tool": "list_dir", "path": path, "ok": False, "error": stop, "repeat_stop": True})
+            return stop
         try:
             target = _safe_path(_workspace_root(ctx), path)
             if not target.is_dir():
@@ -134,6 +213,10 @@ def _register_read_tools(agent: Agent[AgentDeps, Any]) -> None:
     @agent.tool
     def get_upstream_summary(ctx: RunContext[AgentDeps]) -> str:
         """Summarize upstream DAG nodes (reads_from / depends_on context)."""
+        stop = _check_tool_repeat(ctx.deps, "get_upstream_summary")
+        if stop:
+            ctx.deps.trace("tool", {"tool": "get_upstream_summary", "ok": False, "error": stop, "repeat_stop": True})
+            return stop
         if not ctx.deps.upstream_nodes:
             ctx.deps.trace("tool", {"tool": "get_upstream_summary", "ok": True, "nodes": 0})
             return "No upstream nodes."
@@ -156,6 +239,10 @@ def _register_write_tools(agent: Agent[AgentDeps, Any]) -> None:
     @agent.tool
     def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
         """Write UTF-8 text to a workspace-relative path."""
+        stop = _check_tool_repeat(ctx.deps, "write_file", path=path)
+        if stop:
+            ctx.deps.trace("tool", {"tool": "write_file", "path": path, "ok": False, "error": stop, "repeat_stop": True})
+            return stop
         results = apply_actions(
             [{"type": "write_file", "path": path, "content": content}],
             ctx.deps.workspace,
@@ -165,11 +252,15 @@ def _register_write_tools(agent: Agent[AgentDeps, Any]) -> None:
         ctx.deps.trace("tool", {"tool": "write_file", "path": path, "ok": ok, "result": results[0] if results else {}})
         if not ok:
             return f"ERROR: {(results[0] if results else {}).get('error', 'write failed')}"
-        return f"Wrote {path}"
+        return f"Wrote {path}. If acceptance is satisfied, return final structured result NOW (do not re-read the same file)."
 
     @agent.tool
     def run_shell(ctx: RunContext[AgentDeps], command: str, timeout: int = 120) -> str:
         """Run a shell command inside workspace (use for tests/builds)."""
+        stop = _check_tool_repeat(ctx.deps, "run_shell", command=command)
+        if stop:
+            ctx.deps.trace("tool", {"tool": "run_shell", "command": command, "ok": False, "error": stop, "repeat_stop": True})
+            return stop
         results = apply_actions(
             [{"type": "run_shell", "command": command, "timeout": timeout}],
             ctx.deps.workspace,
@@ -199,24 +290,33 @@ def _register_write_tools(agent: Agent[AgentDeps, Any]) -> None:
         return f"EXIT 0\nstdout: {rec.get('stdout', '')}"
 
 
-VALIDATE_SYSTEM = """你是 DAG 单节点验证 agent（只读）。
+VALIDATE_SYSTEM = """你是 DAG 单节点验证 agent（只读）。在 execute 之前运行。
 
-职责：
-1. 检查节点自然语言描述是否清晰、可执行
-2. 检查与上游节点（reads_from/depends_on）衔接是否合理
-3. 检查 acceptance 是否可验证
-4. 可用 read_file / list_dir 查看 workspace；用 get_upstream_summary 看上游
+职责（仅检查计划质量，不是检查 workspace 是否已有产物）：
+1. description 是否清晰、可执行（写「将要做什么」，而非「文件已存在」）
+2. 与上游 reads_from/depends_on 衔接是否合理
+3. acceptance / acceptance_checks 是否可机械验证
 
-不要修改任何文件。只输出结构化结论：passed + issues + suggestions。"""
+硬规则：
+- workspace 里还没有本节点产物是**正常**的，绝不能因此给出 blocker / passed=false
+- 不要反复 list_dir / read_file；最多各用 1 次，优先 get_upstream_summary
+- 工具返回 STOP 后立即输出结构化结论，禁止再调工具
+- 默认倾向 passed=true；仅当描述含糊、缺验收、依赖矛盾时才 blocker
+
+输出：passed + issues + suggestions。"""
 
 EXECUTE_SYSTEM = """你是 DAG 单节点执行 agent。
 
-职责：根据节点 description 在 workspace 内完成工作，满足 acceptance。
-可用 read_file / list_dir / get_upstream_summary 获取上下文；
-用 write_file / run_shell 完成实现与验证。
+职责：按 description 在 workspace 完成工作，满足 acceptance。
+工具：read_file / list_dir / get_upstream_summary / write_file / run_shell。
 
-不要超出节点边界；不要假设未提供的输入。
-完成后输出 status、outputs、acceptance_check（逐条说明如何满足验收）。"""
+硬规则：
+1. 写完目标文件并确认 acceptance 后，**立即**返回 status=success，禁止继续工具循环
+2. 同一路径不要重复 read_file / write_file；工具返回 STOP 后必须立刻输出最终结果
+3. 不要超出本节点边界；中间节点优先写文件，复杂 shell/unittest 留给验收节点
+4. 不要假设未提供的输入
+
+输出：status、outputs、acceptance_check、summary。"""
 
 
 def _build_validate_agent() -> Agent[AgentDeps, ValidateResult]:
@@ -334,11 +434,14 @@ def evaluate_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
         )
         out = result.output
         _trace_messages(deps, result.new_messages(), "validate")
+        filtered_issues, no_blockers = _filter_validate_issues(list(out.issues))
+        # Empty issues → trust model; otherwise remaining blockers decide.
+        passed = bool(out.passed) if not out.issues else no_blockers
         deps.trace(
             "run_end",
             {
-                "passed": out.passed,
-                "issue_count": len(out.issues),
+                "passed": passed,
+                "issue_count": len(filtered_issues),
                 "usage": _run_usage_dump(result),
             },
         )
@@ -355,18 +458,38 @@ def evaluate_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
                 model=cfg["model"],
             )
         return {
-            "passed": out.passed,
+            "passed": passed,
             "skipped": False,
-            "issues": [i.model_dump() for i in out.issues],
+            "issues": [i.model_dump() for i in filtered_issues],
             "suggestions": out.suggestions,
             "model": cfg["model"],
             "executor": "pydantic-ai",
         }
     except Exception as exc:
         deps.trace("run_error", {"error": str(exc)})
+        fail_reason = classify_agent_failure(exc)
+        if fail_reason == "agent_step_limit":
+            # Step budget exhausted while probing workspace — do not block the plan.
+            return {
+                "passed": True,
+                "skipped": False,
+                "fail_reason": fail_reason,
+                "reason": f"validate agent hit step limit: {exc}",
+                "issues": [
+                    {
+                        "severity": "warning",
+                        "type": "agent_step_limit",
+                        "message": str(exc),
+                    }
+                ],
+                "suggestions": ["Validate agent hit step limit; mechanical plan checks still apply."],
+                "model": cfg["model"],
+                "executor": "pydantic-ai",
+            }
         return {
             "passed": None,
             "skipped": True,
+            "fail_reason": fail_reason,
             "reason": f"validate agent failed: {exc}",
             "issues": [],
             "suggestions": [],
@@ -451,9 +574,12 @@ def execute_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:
         deps.trace("run_error", {"error": str(exc)})
+        fail_reason = classify_agent_failure(exc)
+        # Keep actions so orchestrator can still pass mechanical acceptance.
         return {
             "status": "failed",
-            "skipped": True,
+            "skipped": False,
+            "fail_reason": fail_reason,
             "reason": f"execute agent failed: {exc}",
             "outputs": {},
             "acceptance_check": [],

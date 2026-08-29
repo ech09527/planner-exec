@@ -102,8 +102,26 @@ def _suggested_patches(
         if not checks and node.get("acceptance"):
             checks.append({"type": "file_exists", "path": "."})
         return [{"op": "replace", "node_id": node_id, "node": {"acceptance_checks": checks}}]
-    if kind == "escalation":
+    if kind in ("escalation", "execution_failure"):
+        err = ""
+        if execution:
+            err = str(execution.get("error") or execution.get("fail_reason") or "")
+        step_limit = "request_limit" in err.lower() or "step" in err.lower() or execution and execution.get("fail_reason") == "agent_step_limit"
         desc = (node.get("description") or "")[:200]
+        if step_limit:
+            return [
+                {
+                    "op": "replace",
+                    "node_id": node_id,
+                    "node": {
+                        "description": (
+                            f"{desc} 写完目标文件后立即结束，不要反复 read_file/run_shell。"
+                            if desc
+                            else "完成写入后立即结束，禁止工具循环。"
+                        ),
+                    },
+                }
+            ]
         return [
             {
                 "op": "replace",
@@ -111,16 +129,7 @@ def _suggested_patches(
                 "node": {
                     "description": desc or "Simplify this step and retry with a smaller scope.",
                 },
-            },
-            {
-                "op": "insert_after",
-                "after": node_id,
-                "node": {
-                    "id": f"{node_id}-retry",
-                    "description": "Retry with a smaller scope after simplifying prerequisites.",
-                    "acceptance": node.get("acceptance") or "step completes without error",
-                },
-            },
+            }
         ]
     return []
 

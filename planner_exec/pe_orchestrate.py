@@ -7,6 +7,7 @@ from typing import Any
 from . import db
 from .pe_acceptance import check_node_acceptance
 from .pe_actions import apply_actions
+from .pe_agent import classify_agent_failure
 from .pe_dag import (
     next_executable_node,
     node_failed_count,
@@ -326,6 +327,11 @@ def internal_execute_node(
 
     llm_result = execute_node_with_llm(context)
     if llm_result.get("skipped"):
+        fail_reason = llm_result.get("fail_reason") or classify_agent_failure(
+            llm_result.get("reason") or "llm_unavailable"
+        )
+        if fail_reason == "agent_error" and not llm_result.get("model"):
+            fail_reason = "llm_unavailable"
         entry = {
             "node_id": nid,
             "started_at": started_at,
@@ -336,11 +342,12 @@ def internal_execute_node(
             "error": llm_result.get("reason"),
             "executor": llm_result.get("executor", "script"),
             "model": llm_result.get("model"),
+            "fail_reason": fail_reason,
         }
         now = utc_now()
         db.append_execution(task_id, phase, {**entry, "saved_at": now, "phase": phase})
         db.write_escalation(
-            task_id, phase, {"task_id": task_id, "node_id": nid, "reason": "llm_unavailable", "detail": llm_result}, now
+            task_id, phase, {"task_id": task_id, "node_id": nid, "reason": fail_reason, "detail": llm_result}, now
         )
         return {"status": "failed", "node_id": nid, "record": entry, "escalate": True}
 
@@ -355,7 +362,19 @@ def internal_execute_node(
         status = "failed"
 
     acceptance = check_node_acceptance(node, workspace, status)
-    if not acceptance.get("passed"):
+    if not acceptance.get("skipped"):
+        # Defined mechanical checks are authoritative.
+        if acceptance.get("passed"):
+            status = "success"
+            combined_error = None
+        else:
+            status = "failed"
+            acceptance_msg = "; ".join(
+                r.get("error") or f"{r.get('type')} failed" for r in acceptance.get("results", []) if not r.get("passed")
+            )
+            llm_error = llm_result.get("error") or ""
+            combined_error = "; ".join(filter(None, [llm_error, acceptance_msg or acceptance.get("reason")]))
+    elif not acceptance.get("passed"):
         status = "failed"
         acceptance_msg = "; ".join(
             r.get("error") or f"{r.get('type')} failed" for r in acceptance.get("results", []) if not r.get("passed")
@@ -378,6 +397,7 @@ def internal_execute_node(
         "error": combined_error,
         "executor": llm_result.get("executor", "pydantic-ai"),
         "model": llm_result.get("model"),
+        "fail_reason": llm_result.get("fail_reason"),
     }
     now = utc_now()
     db.append_execution(task_id, phase, {**entry, "saved_at": now, "phase": phase})

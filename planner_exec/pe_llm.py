@@ -53,11 +53,20 @@ def llm_available() -> bool:
 
 
 def _needs_openai_response_compat(base_url: str) -> bool:
-    """Some OpenAI-compatible proxies omit required fields (e.g. object=chat.completion)."""
-    if os.environ.get("PE_LLM_OPENAI_COMPAT", "").lower() in ("1", "true", "yes"):
+    """Some OpenAI-compatible proxies omit required fields (e.g. object=chat.completion).
+
+    Default on for non-official OpenAI hosts; set PE_LLM_OPENAI_COMPAT=0 to disable.
+    """
+    flag = os.environ.get("PE_LLM_OPENAI_COMPAT", "").lower()
+    if flag in ("0", "false", "no"):
+        return False
+    if flag in ("1", "true", "yes"):
         return True
     host = base_url.lower()
-    return "nocsdn.com" in host or "copilot-api" in host
+    # Official OpenAI is usually complete; most local/proxy gateways are not.
+    if "api.openai.com" in host:
+        return False
+    return True
 
 
 async def _patch_openai_chat_completion_response(response: httpx.Response) -> None:
@@ -68,8 +77,16 @@ async def _patch_openai_chat_completion_response(response: httpx.Response) -> No
         data = json.loads(response.content)
     except json.JSONDecodeError:
         return
+    changed = False
     if data.get("object") is None and "choices" in data:
         data["object"] = "chat.completion"
+        changed = True
+    if data.get("created") is None and "choices" in data:
+        import time
+
+        data["created"] = int(time.time())
+        changed = True
+    if changed:
         response._content = json.dumps(data).encode("utf-8")
 
 
