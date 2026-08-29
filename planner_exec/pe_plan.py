@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from . import db
 from .pe_dag import dag_revision
+from .pe_dag_eval import evaluate_plan_dags, save_dag_eval
 from .pe_util import make_task_id, utc_now, validate_dag, validate_goal_confirmed, validate_phases
 
 
@@ -41,7 +43,12 @@ def _risk_flags(plan: dict[str, Any]) -> list[str]:
     return flags[:10]
 
 
-def build_plan_summary(task_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+def build_plan_summary(
+    task_id: str,
+    plan: dict[str, Any],
+    *,
+    dag_eval: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     phases_list = (plan.get("phases") or {}).get("phases") or []
     dags = plan.get("dags") or []
     node_total = sum(len(d.get("nodes") or []) for d in dags)
@@ -69,9 +76,16 @@ def build_plan_summary(task_id: str, plan: dict[str, Any]) -> dict[str, Any]:
         )
 
     risks = _risk_flags(plan)
-    return {
+    dag_ok = True if dag_eval is None else bool(dag_eval.get("passed"))
+    ready = (
+        len(phases_list) > 0
+        and len(dags) == len(phases_list)
+        and node_total > 0
+        and dag_ok
+    )
+    out: dict[str, Any] = {
         "task_id": task_id,
-        "status": "planned",
+        "status": "planned" if dag_ok else "dag_eval_failed",
         "summary": {
             "goal": (plan.get("goal_confirmed") or {}).get("goal") or plan.get("goal"),
             "phase_count": len(phases_list),
@@ -80,9 +94,18 @@ def build_plan_summary(task_id: str, plan: dict[str, Any]) -> dict[str, Any]:
             "phases": phase_summaries,
             "risk_flags": risks,
         },
-        "ready_for_run": len(phases_list) > 0 and len(dags) == len(phases_list) and node_total > 0,
-        "next": "planner_run",
+        "ready_for_run": ready,
+        "next": "planner_run" if ready else "revise plan then planner_plan (or replan patches)",
     }
+    if dag_eval is not None:
+        out["dag_eval"] = {
+            "passed": dag_eval.get("passed"),
+            "blocker_count": dag_eval.get("blocker_count"),
+            "issues": (dag_eval.get("issues") or [])[:8],
+            "suggestions": (dag_eval.get("suggestions") or [])[:5],
+            "fingerprint": dag_eval.get("fingerprint"),
+        }
+    return out
 
 
 def apply_plan(
@@ -96,6 +119,7 @@ def apply_plan(
     max_node_eval_iterations: int = 3,
     max_node_execute_retries: int = 2,
     source: str = "mcp",
+    skip_dag_llm: bool | None = None,
 ) -> dict[str, Any]:
     validate_plan_shape(plan)
     validate_goal_confirmed(plan["goal_confirmed"])
@@ -129,14 +153,23 @@ def apply_plan(
         if p not in seen_phases:
             raise PlanError(f"missing dag for phase {p}")
 
-    if validate_only:
-        tid = task_id or make_task_id(plan["goal"])
-        out = build_plan_summary(tid, plan)
-        out["validate_only"] = True
-        out["ready_for_run"] = True
-        return out
+    if skip_dag_llm is None:
+        skip_dag_llm = os.environ.get("PE_SKIP_DAG_LLM", "").lower() in ("1", "true", "yes")
 
     tid = task_id or make_task_id(plan["goal"])
+    dag_eval = evaluate_plan_dags(
+        goal=plan.get("goal_confirmed"),
+        phases_doc=plan["phases"],
+        dags=dags,
+        task_id=None if validate_only else tid,
+        skip_llm=bool(skip_dag_llm),
+    )
+
+    if validate_only:
+        out = build_plan_summary(tid, plan, dag_eval=dag_eval)
+        out["validate_only"] = True
+        return out
+
     if db.task_exists(tid) and not force:
         raise PlanError(f"task already exists: {tid} (use force=true to overwrite)", status=409)
 
@@ -145,11 +178,12 @@ def apply_plan(
 
     now = utc_now()
     context = plan.get("context") or {}
+    status = "planned" if dag_eval.get("passed") else "dag_eval_failed"
     meta = {
         "task_id": tid,
         "created_at": now,
         "updated_at": now,
-        "status": "planned",
+        "status": status,
         "max_node_eval_iterations": max_node_eval_iterations,
         "max_node_execute_retries": max_node_execute_retries,
         "agent_id": agent_id,
@@ -175,13 +209,16 @@ def apply_plan(
         db.save_phase_dag(tid, phase, rev, payload, now)
         last_rev = rev
 
+    dag_eval = {**dag_eval, "task_id": tid}
+    save_dag_eval(tid, dag_eval)
+
     db.update_task_meta(
         tid,
         updated_at=now,
-        status="planned",
+        status=status,
         goal=plan["goal_confirmed"].get("goal"),
         phase_count=phase_count,
         dag_revision=last_rev,
     )
 
-    return build_plan_summary(tid, plan)
+    return build_plan_summary(tid, plan, dag_eval=dag_eval)

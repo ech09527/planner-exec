@@ -56,6 +56,7 @@ def temp_db(monkeypatch):
         db_path = Path(tmp) / "test.db"
         monkeypatch.setattr(db, "DB_PATH", db_path)
         monkeypatch.setattr(db, "ROOT", Path(tmp))
+        monkeypatch.setenv("PE_SKIP_DAG_LLM", "1")
         db.init_db()
         yield
 

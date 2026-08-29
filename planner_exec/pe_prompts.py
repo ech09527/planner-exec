@@ -133,7 +133,7 @@ def plan_design_guide_text() -> str:
 **acceptance_checks**（仅三种）
 - file_exists: {"type":"file_exists","path":"相对 workspace 路径"}
 - shell: {"type":"shell","command":"...","expect_exit":0}
-- file_contains: {"type":"file_contains","path":"...","substr":"..."}
+- file_contains: {"type":"file_contains","path":"...","contains":"..."}
 
 **reads_from**
 - 同 phase 上游 node id 列表；仅在上游完成后执行

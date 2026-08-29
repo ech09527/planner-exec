@@ -9,7 +9,7 @@ description: >-
 
 # Planner-Exec
 
-主 Agent 规划，MCP 内 cheap LLM **先 eval 再 execute** phase DAG。
+主 Agent 规划，MCP 内 cheap LLM：**dag_eval → node_eval → execute → 机械 verify**。
 
 ## 何时用
 
@@ -21,9 +21,9 @@ description: >-
 ```
 1. prompts/get → plan-design-guide   （首次规划必做）
 2. 可选 get → plan-example-calc
-3. planner_plan(plan={goal, goal_confirmed, phases, dags})
-4. 只记 task_id + summary；勿复述 nodes[]
-5. planner_run(task_id)              （不可跳过 eval）
+3. planner_plan(plan={goal, goal_confirmed, phases, dags})  # 含整图 dag_eval
+4. 只记 task_id + summary；ready_for_run=false 则按 dag_eval.issues 修订
+5. planner_run(task_id)              （dag_eval 闸门 + 节点 eval）
 6. blocked → get replan-guide → planner_replan → patches → run
 ```
 
@@ -37,8 +37,8 @@ description: >-
 | reads_from | 仅同 phase 内 node id；跨 phase 用 `phases.inputs/outputs` |
 | description | 写「执行阶段将做什么」；勿写 workspace 文件是否已存在 |
 | 验收 | 中间节点优先 `file_exists`；shell/unittest 放 phase 最后一节点 |
-| run | 始终机械检查 + LLM eval，再 execute；无跳过开关 |
-| blocked | `planner_replan`，勿整包重 plan |
+| run | dag_eval 闸门 → 机械 + LLM node_eval → execute；无跳过开关 |
+| blocked | `planner_replan`，勿整包重 plan；plan 时 dag_eval 失败则修订后再 plan |
 
 ## plan 包骨架
 
@@ -81,7 +81,7 @@ description: >-
 }
 ```
 
-`acceptance_checks` 仅：`file_exists` | `shell` | `file_contains`。
+`acceptance_checks` 仅：`file_exists` | `shell` | `file_contains`（`file_contains` 用 `contains`；兼容旧字段 `substr`）。
 
 ## MCP Prompts（按需 get，不会自动注入）
 

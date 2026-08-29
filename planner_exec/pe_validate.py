@@ -127,6 +127,20 @@ def build_node_eval_context(
                 "acceptance": node_acceptance(all_nodes[dep_id]),
             }
 
+    siblings = []
+    for other in all_nodes.values():
+        oid = other.get("id")
+        if not oid or oid == node.get("id"):
+            continue
+        siblings.append(
+            {
+                "id": oid,
+                "description": other.get("description"),
+                "acceptance": node_acceptance(other),
+                "acceptance_checks": other.get("acceptance_checks") or [],
+            }
+        )
+
     return {
         "evaluation_scope": "single_node",
         "phase": {"id": (phase or {}).get("id"), "title": (phase or {}).get("title")},
@@ -145,5 +159,6 @@ def build_node_eval_context(
             "acceptance_checks": node.get("acceptance_checks") or [],
         },
         "upstream_nodes": upstream,
+        "phase_siblings": siblings,
         "all_node_ids": list(all_nodes.keys()),
     }

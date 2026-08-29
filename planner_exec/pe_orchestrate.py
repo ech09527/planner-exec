@@ -14,6 +14,7 @@ from .pe_dag import (
     phase_execution_complete,
     resolve_node_inputs,
 )
+from .pe_dag_eval import ensure_dag_eval_passed
 from .pe_llm import evaluate_node_with_llm, execute_node_with_llm
 from .pe_node import node_dependencies, slim_node_for_prompt
 from .pe_progress import emit_progress
@@ -426,78 +427,35 @@ def internal_execute_node(
     return {"status": status, "node_id": nid, "record": entry}
 
 
-def cmd_execute_node(args: argparse.Namespace) -> None:
-    task_id = require_task_id(args.task_id)
-    if args.phase is None:
-        raise SystemExit("ERROR: --phase is required")
-    ensure_task(task_id)
-    result = internal_execute_node(task_id, args.phase, args.node, dry_run=args.dry_run)
-    if result.get("node_id"):
-        db.update_task_meta(
-            task_id,
-            updated_at=utc_now(),
-            status=f"executing_phase_{args.phase:02d}_{result['node_id']}",
-        )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
-def cmd_next_node(args: argparse.Namespace) -> None:
-    task_id = require_task_id(args.task_id)
-    if args.phase is None:
-        raise SystemExit("ERROR: --phase is required")
-    ensure_task(task_id)
-    dag = db.get_phase_dag(task_id, args.phase)
-    if not dag:
-        raise SystemExit(f"ERROR: dag not found for phase {args.phase}")
-    executions = db.load_executions(task_id, args.phase)
-    meta = db.get_task_meta(task_id)
-    max_retries = int(meta.get("max_node_execute_retries", DEFAULT_MAX_NODE_EXECUTE_RETRIES))
-    nxt = next_executable_node(dag, executions, max_retries=max_retries)
-    rev = dag.get("dag_revision")
-
-    payload: dict[str, Any] = {"task_id": task_id, "phase": args.phase, "next": None}
-    if nxt:
-        nid = nxt["node"]["id"]
-        latest_eval = db.latest_node_eval(task_id, args.phase, nid, rev)
-        payload["next"] = {
-            "node_id": nid,
-            "action": nxt["action"],
-            "reason": nxt.get("reason"),
-            "eval_passed": bool(latest_eval and latest_eval.get("passed")),
-        }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def cmd_eval_phase(args: argparse.Namespace) -> None:
-    task_id = require_task_id(args.task_id)
-    if args.phase is None:
-        raise SystemExit("ERROR: --phase is required")
-    ensure_task(task_id)
-    dag = db.get_phase_dag(task_id, args.phase)
-    if not dag:
-        raise SystemExit(f"ERROR: dag not found for phase {args.phase}")
-    rev = dag.get("dag_revision")
-    results = []
-    for node in dag.get("nodes", []):
-        nid = node["id"]
-        if args.node and nid != args.node:
-            continue
-        latest = db.latest_node_eval(task_id, args.phase, nid, rev)
-        if latest and latest.get("passed") and not args.force:
-            results.append({"node_id": nid, "passed": True, "cached": True})
-            continue
-        results.append(
-            internal_eval_node(task_id, args.phase, nid, force=args.force)
-        )
-    all_passed = all(r.get("passed") for r in results)
-    print(json.dumps({"task_id": task_id, "phase": args.phase, "all_passed": all_passed, "nodes": results}, ensure_ascii=False, indent=2))
-
-
 def internal_run_phase(
     task_id: str,
     phase: int,
 ) -> dict[str, Any]:
     emit_progress(task_id, "phase_start", phase=phase, status="running")
+
+    dag_gate = ensure_dag_eval_passed(task_id)
+    if not dag_gate.get("passed"):
+        emit_progress(
+            task_id,
+            "phase_blocked",
+            phase=phase,
+            status="dag_eval_failed",
+            message="whole-DAG eval did not pass",
+        )
+        return {
+            "status": "blocked",
+            "stage": "dag_eval",
+            "task_id": task_id,
+            "phase": phase,
+            "dag_eval": {
+                "passed": False,
+                "cached": dag_gate.get("cached"),
+                "blocker_count": dag_gate.get("blocker_count"),
+                "issues": (dag_gate.get("issues") or [])[:8],
+                "suggestions": (dag_gate.get("suggestions") or [])[:5],
+            },
+            "message": "dag_eval failed — Host should revise plan then replan/plan",
+        }
 
     eval_result = eval_phase_internal(task_id, phase)
     if not eval_result["all_passed"]:

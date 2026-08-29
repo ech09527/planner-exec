@@ -8,7 +8,8 @@ from typing import Any
 
 from . import db
 from .pe_dag import dag_revision, next_executable_node
-from .pe_llm import evaluate_node_with_llm, llm_available
+from .pe_dag_eval import invalidate_dag_eval
+from .pe_llm import llm_available
 from .pe_orchestrate import (
     compute_progress,
     internal_eval_node,
@@ -37,8 +38,6 @@ from .pe_util import (
     validate_goal_confirmed,
     validate_phases,
 )
-from .pe_validate import build_node_eval_context, validate_node_mechanical
-
 
 def cmd_plan(args: argparse.Namespace) -> None:
     plan = read_data_arg(getattr(args, "plan_file", None), getattr(args, "plan", None))
@@ -137,6 +136,7 @@ def cmd_save(args: argparse.Namespace) -> None:
         rev = dag_revision(data)
         payload = {**data, "saved_at": now, "phase": args.phase, "dag_revision": rev}
         db.save_phase_dag(task_id, args.phase, rev, payload, now)
+        invalidate_dag_eval(task_id)
         updates["status"] = f"dag_defined_phase_{args.phase:02d}"
         updates["dag_revision"] = rev
 
@@ -222,106 +222,31 @@ def cmd_eval_node(args: argparse.Namespace) -> None:
         raise SystemExit("ERROR: --node is required")
 
     ensure_task(task_id)
-    meta = db.get_task_meta(task_id)
-    max_iter = int(meta.get("max_node_eval_iterations", DEFAULT_MAX_NODE_EVAL_ITERATIONS))
-
     dag = db.get_phase_dag(task_id, args.phase)
     if not dag:
         raise SystemExit(f"ERROR: dag not found for phase {args.phase}")
-
-    nodes = dag.get("nodes", [])
-    nodes_by_id = {n["id"]: n for n in nodes}
-    node = nodes_by_id.get(args.node)
-    if not node:
+    nodes_by_id = {n["id"]: n for n in dag.get("nodes", [])}
+    if args.node not in nodes_by_id:
         raise SystemExit(f"ERROR: node not found in dag: {args.node}")
 
-    rev = dag.get("dag_revision")
-    latest = db.latest_node_eval(task_id, args.phase, args.node, rev)
-    if args.iteration is not None:
-        iteration = args.iteration
-    else:
-        iteration = int((latest or {}).get("iteration", 0)) + 1
+    result = internal_eval_node(task_id, args.phase, args.node, force=bool(args.force))
+    if result.get("error") and "task_id" not in result:
+        raise SystemExit(f"ERROR: {result['error']}")
 
-    if iteration > max_iter and not args.force:
-        raise SystemExit(
-            f"ERROR: node {args.node} exceeded max eval iterations ({max_iter}); use --force to continue"
-        )
-
-    phases_doc = db.get_artifact(task_id, "phases") or {"phases": []}
-    phase_def = None
-    if 0 < args.phase <= len(phases_doc.get("phases", [])):
-        phase_def = phases_doc["phases"][args.phase - 1]
-    goal = db.get_artifact(task_id, "goal-confirmed")
-
-    mechanical = validate_node_mechanical(node, nodes_by_id, phase_def)
-
-    context = build_node_eval_context(node, nodes_by_id, dag, phase_def, goal)
-    context["task_id"] = task_id
-    context["phase_number"] = args.phase
-    context["workspace"] = db.get_task_meta(task_id).get("workspace")
-    llm_result = evaluate_node_with_llm(context)
-
-    combined_issues = list(mechanical.get("issues", []))
-    llm_passed: bool | None = llm_result.get("passed") if not llm_result.get("skipped") else None
-
-    if llm_passed is False:
-        for issue in llm_result.get("issues", []):
-            combined_issues.append(
-                {
-                    "node_id": args.node,
-                    "severity": issue.get("severity", "blocker"),
-                    "type": issue.get("type", "ambiguity"),
-                    "message": issue.get("message", ""),
-                    "source": "llm",
-                }
-            )
-
-    blocker_count = sum(1 for i in combined_issues if i.get("severity") == "blocker")
-    if not mechanical.get("passed"):
-        passed = False
-    elif llm_result.get("skipped"):
-        passed = False
-        combined_issues.append(
-            {
-                "node_id": args.node,
-                "severity": "blocker",
-                "type": "llm",
-                "message": llm_result.get("reason", "LLM evaluation was skipped"),
-                "source": "system",
-            }
-        )
-        blocker_count += 1
-    elif llm_passed is True:
-        passed = True
-    else:
-        passed = False
-
-    result = {
-        "task_id": task_id,
-        "phase": args.phase,
-        "node_id": args.node,
-        "dag_revision": rev,
-        "iteration": iteration,
-        "passed": passed,
-        "mechanical": mechanical,
-        "llm": llm_result,
-        "issues": combined_issues,
-        "blocker_count": blocker_count,
-        "evaluated_at": utc_now(),
-        "next_step": (
+    result.setdefault(
+        "next_step",
+        (
             "node ready for execution"
-            if passed
+            if result.get("passed")
             else "revise this node in dag, save dag, then re-run eval-node"
         ),
-    }
-
-    db.save_node_eval(result)
+    )
+    iteration = int(result.get("iteration") or 0)
     db.update_task_meta(
         task_id,
         updated_at=utc_now(),
         status=f"node_eval_phase_{args.phase:02d}_{args.node}_iter_{iteration:02d}",
     )
-
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -43,8 +43,9 @@ blocked：planner_replan（无 patches 拿包）→ replan(patches=...) → run
 - reads_from 仅同 phase 内 node id；跨 phase 用 phases.inputs/outputs
 - node description 写「执行阶段将做什么」，勿写 workspace 文件是否已存在
 - 集成 shell/unittest 放该 phase 最后一节点；中间节点优先 file_exists
+- planner_plan 内置整图 dag_eval；失败则 ready_for_run=false，Host 修订后再 plan/replan
+- planner_run：dag_eval 闸门 → 逐节点 LLM eval → execute；不可跳过
 - planner_plan 后勿复述 nodes[]；query_logs limit=20，勿 detail=true
-- planner_run 必先 LLM eval 再 execute，不可跳过评估
 
 规划前 get prompt「plan-design-guide」；需要结构参考 get「plan-example-calc」；
 blocked 时 get「replan-guide」。init/save 仅在 PE_MCP_OBSERVE_TOOLS=1。
@@ -66,6 +67,7 @@ server = MCPServer(
     name="planner_plan",
     description=(
         "Create task and save goal-confirmed + phases + all phase DAGs atomically. "
+        "Runs whole-DAG eval (dag_eval); ready_for_run=false if it fails — revise and replan/plan. "
         "Before first plan, get MCP prompt plan-design-guide. "
         "Returns slim summary only (no full nodes[]). Use validate_only to check without writing."
     ),
@@ -101,7 +103,7 @@ def planner_plan(
     name="planner_run",
     description=(
         "Run task (all phases) or single phase if phase is set. "
-        "Always evaluates every node (mechanical + LLM) before execute. Default slim response."
+        "Gates on dag_eval, then evaluates every node (mechanical + LLM) before execute. Default slim response."
     ),
 )
 def planner_run(

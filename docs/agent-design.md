@@ -2,9 +2,16 @@
 
 ## 框架：**pydantic-ai**
 
-- **验证 agent**：只读工具 → `ValidateResult`
-- **执行 agent**：读写工具 → `ExecuteResult`
-- 每步 `agent_traces`；主 Agent 用 `planner_query_logs` 查 `replan_hints`
+角色：
+
+| 角色 | 实现 | 说明 |
+|------|------|------|
+| `dag_eval` | `pe_dag_eval` + LLM | 整图计划质量；挂在 `planner_plan` / `planner_run` 闸门 |
+| `node_eval` | validate agent（无工具） | 单节点计划质量 |
+| `node_execute` | execute agent（读写工具） | 写 workspace |
+| `node_verify` | `pe_acceptance` 机械 checks | 权威验收；暂无 LLM |
+
+每步 `agent_traces`；主 Agent 用 `planner_query_logs` 查 `replan_hints`。
 
 ## 节点 schema v2
 

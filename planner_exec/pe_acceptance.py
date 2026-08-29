@@ -54,10 +54,23 @@ def _check_shell(workspace: str | None, spec: dict[str, Any]) -> dict[str, Any]:
 
 def _check_file_contains(workspace: str | None, spec: dict[str, Any]) -> dict[str, Any]:
     rel = spec.get("path", "")
-    needle = spec.get("contains", "")
+    needle = spec.get("contains")
+    if needle is None:
+        needle = spec.get("substr")
+    if needle is None:
+        needle = ""
+    needle = str(needle)
     base = _check_file_exists(workspace, spec)
     if not base.get("passed"):
-        return {**base, "type": "file_contains"}
+        return {**base, "type": "file_contains", "contains": needle}
+    if not needle:
+        return {
+            "type": "file_contains",
+            "path": rel,
+            "contains": needle,
+            "passed": False,
+            "error": "empty contains/substr",
+        }
     root = Path(workspace).resolve()
     content = (root / rel).read_text(encoding="utf-8")
     ok = needle in content

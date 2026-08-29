@@ -1,7 +1,11 @@
 """Internal worker agents powered by pydantic-ai.
 
-Validate agent: read-only tools, structured ValidateResult.
-Execute agent: read/write tools, structured ExecuteResult.
+Roles:
+  dag_eval     — whole-DAG plan quality (no tools)
+  node_eval    — single-node plan quality (no tools) → ValidateResult
+  node_execute — workspace execute (read/write tools) → ExecuteResult
+  node_verify  — mechanical acceptance_checks (pe_acceptance; not an LLM agent)
+
 Each tool call and run step is logged to agent_traces for planner_query_logs.
 """
 
@@ -41,6 +45,20 @@ class EvalIssue(BaseModel):
 class ValidateResult(BaseModel):
     passed: bool
     issues: list[EvalIssue] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class DagEvalIssue(BaseModel):
+    severity: Literal["blocker", "warning"] = "blocker"
+    type: str = "dag_quality"
+    message: str
+    phase: int | None = None
+    node_id: str | None = None
+
+
+class DagEvalResult(BaseModel):
+    passed: bool
+    issues: list[DagEvalIssue] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 
 
@@ -290,18 +308,34 @@ def _register_write_tools(agent: Agent[AgentDeps, Any]) -> None:
         return f"EXIT 0\nstdout: {rec.get('stdout', '')}"
 
 
-VALIDATE_SYSTEM = """你是 DAG 单节点验证 agent（只读）。在 execute 之前运行。
+DAG_EVAL_SYSTEM = """你是整图 DAG 评估 agent（无工具）。在 planner_plan / planner_run 闸门运行。
 
-职责（仅检查计划质量，不是检查 workspace 是否已有产物）：
-1. description 是否清晰、可执行（写「将要做什么」，而非「文件已存在」）
-2. 与上游 reads_from/depends_on 衔接是否合理
-3. acceptance / acceptance_checks 是否可机械验证
+职责（看整张图，不是单节点抠细节）：
+1. 拓扑与职责切分是否合理（中间写文件 → 靠后集成验收）
+2. success_criteria / 各节点承诺是否能被某处 acceptance_checks 机械覆盖
+3. 跨 phase 衔接是否靠 phases.inputs/outputs（reads_from 仅同 phase）
 
 硬规则：
-- workspace 里还没有本节点产物是**正常**的，绝不能因此给出 blocker / passed=false
-- 不要反复 list_dir / read_file；最多各用 1 次，优先 get_upstream_summary
-- 工具返回 STOP 后立即输出结构化结论，禁止再调工具
-- 默认倾向 passed=true；仅当描述含糊、缺验收、依赖矛盾时才 blocker
+- 中间节点只用 file_exists **完全正常**；不要因此 blocker
+- 若 description 提到 unittest/CLI，但同 phase 或后续 phase 已有 shell/file_contains 覆盖 → 放行
+- 仅当整图缺少对关键验收的机械覆盖、或依赖/切分明显矛盾时才 passed=false
+- 不要因为 workspace 尚无产物失败
+
+输出：passed + issues（可带 phase/node_id）+ suggestions。"""
+
+VALIDATE_SYSTEM = """你是 DAG 单节点验证 agent（无工具 / node_eval）。在 execute 之前运行。
+
+职责（仅本节点计划质量，不是整图、不是检查 workspace 产物）：
+1. description 是否清晰、可执行（写「将要做什么」，而非「文件已存在」）
+2. 与上游 reads_from/depends_on 衔接是否合理（依据 prompt 中的 upstream_nodes）
+3. 本节点是否有非空 acceptance / acceptance_checks，类型合法
+
+硬规则：
+- 你没有工具；只根据 prompt JSON 判断
+- workspace 里还没有本节点产物是**正常**的，绝不能因此 blocker
+- **中间节点只用 file_exists 是正常的**；集成/unittest 细节由同 phase 后续节点或 dag_eval 负责
+- 若 phase_siblings 显示后续节点已有 shell/file_contains，不要因「本节点 checks 偏弱」blocker
+- 默认倾向 passed=true；仅当描述含糊、完全缺验收、依赖矛盾时才 blocker
 
 输出：passed + issues + suggestions。"""
 
@@ -319,6 +353,15 @@ EXECUTE_SYSTEM = """你是 DAG 单节点执行 agent。
 输出：status、outputs、acceptance_check、summary。"""
 
 
+def _build_dag_eval_agent() -> Agent[AgentDeps, DagEvalResult]:
+    return Agent(
+        OpenAIChatModel("gpt-4o-mini", provider=OpenAIProvider(api_key="placeholder")),
+        deps_type=AgentDeps,
+        output_type=DagEvalResult,
+        system_prompt=DAG_EVAL_SYSTEM,
+    )
+
+
 def _build_validate_agent() -> Agent[AgentDeps, ValidateResult]:
     agent: Agent[AgentDeps, ValidateResult] = Agent(
         OpenAIChatModel("gpt-4o-mini", provider=OpenAIProvider(api_key="placeholder")),
@@ -326,7 +369,7 @@ def _build_validate_agent() -> Agent[AgentDeps, ValidateResult]:
         output_type=ValidateResult,
         system_prompt=VALIDATE_SYSTEM,
     )
-    _register_read_tools(agent)
+    # Validate is plan-quality only: no workspace tools (avoids probe loops / step-limit noise).
     return agent
 
 
@@ -342,6 +385,7 @@ def _build_execute_agent() -> Agent[AgentDeps, ExecuteResult]:
     return agent
 
 
+_dag_eval_agent = _build_dag_eval_agent()
 _validate_agent = _build_validate_agent()
 _execute_agent = _build_execute_agent()
 
@@ -365,15 +409,22 @@ def _trace_messages(deps: AgentDeps, messages: list[Any], role: str) -> None:
         deps.trace("message", {"role": role, "message": data})
 
 
+def _dag_eval_prompt(context: dict[str, Any]) -> str:
+    return "请评估以下整图 DAG（无工具；整图闭合优先）：\n\n" + json.dumps(
+        context, ensure_ascii=False, indent=2
+    )
+
+
 def _validate_prompt(context: dict[str, Any]) -> str:
     payload = {
         "node": context.get("node"),
         "upstream_nodes": context.get("upstream_nodes"),
+        "phase_siblings": context.get("phase_siblings"),
         "goal_success_criteria": context.get("goal_success_criteria"),
         "phase": context.get("phase"),
         "workspace": context.get("workspace"),
     }
-    return "请验证以下 DAG 节点（只读工具可用）：\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+    return "请验证以下 DAG 节点（无工具；仅根据下列 JSON 判断计划质量）：\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _execute_prompt(context: dict[str, Any]) -> str:
@@ -397,6 +448,100 @@ def _meta_from_context(context: dict[str, Any]) -> tuple[str | None, int | None,
     node = context.get("node") or {}
     node_id = node.get("id")
     return task_id, phase, node_id
+
+
+def evaluate_dag_with_agent(context: dict[str, Any]) -> dict[str, Any]:
+    cfg = load_llm_config("eval")
+    if not cfg["api_key"]:
+        return {
+            "passed": None,
+            "skipped": True,
+            "reason": "no LLM API key (set PE_LLM_API_KEY)",
+            "issues": [],
+            "suggestions": [],
+            "model": None,
+            "executor": "pydantic-ai",
+        }
+
+    task_id = context.get("task_id")
+    deps = AgentDeps(
+        task_id=task_id,
+        phase=None,
+        node_id=None,
+        agent_role="dag_eval",
+        workspace=None,
+    )
+    deps.trace("run_start", {"context_keys": list(context.keys())})
+    user_prompt = _dag_eval_prompt(context)
+
+    try:
+        result = _dag_eval_agent.run_sync(
+            user_prompt,
+            deps=deps,
+            model=build_pe_model(cfg),
+            usage_limits=_usage_limits(),
+        )
+        out = result.output
+        _trace_messages(deps, result.new_messages(), "dag_eval")
+        blockers = [i for i in out.issues if i.severity == "blocker"]
+        passed = bool(out.passed) if not out.issues else len(blockers) == 0
+        deps.trace(
+            "run_end",
+            {
+                "passed": passed,
+                "issue_count": len(out.issues),
+                "usage": _run_usage_dump(result),
+            },
+        )
+        if task_id:
+            from .pe_token import record_internal_llm_from_usage
+
+            record_internal_llm_from_usage(
+                task_id,
+                "dag_eval",
+                _run_usage_dump(result),
+                phase=None,
+                node_id=None,
+                model=cfg["model"],
+            )
+        return {
+            "passed": passed,
+            "skipped": False,
+            "issues": [i.model_dump() for i in out.issues],
+            "suggestions": out.suggestions,
+            "model": cfg["model"],
+            "executor": "pydantic-ai",
+        }
+    except Exception as exc:
+        deps.trace("run_error", {"error": str(exc)})
+        fail_reason = classify_agent_failure(exc)
+        if fail_reason == "agent_step_limit":
+            return {
+                "passed": False,
+                "skipped": False,
+                "fail_reason": fail_reason,
+                "reason": f"dag_eval agent hit step limit: {exc}",
+                "issues": [
+                    {
+                        "severity": "blocker",
+                        "type": "agent_step_limit",
+                        "message": str(exc),
+                    }
+                ],
+                "suggestions": ["Simplify plan or raise PE_AGENT_MAX_STEPS"],
+                "model": cfg["model"],
+                "executor": "pydantic-ai",
+            }
+        return {
+            "passed": None,
+            "skipped": True,
+            "fail_reason": fail_reason,
+            "reason": f"dag_eval agent failed: {exc}",
+            "issues": [],
+            "suggestions": [],
+            "model": cfg["model"],
+            "executor": "pydantic-ai",
+        }
 
 
 def evaluate_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
@@ -469,20 +614,22 @@ def evaluate_node_with_agent(context: dict[str, Any]) -> dict[str, Any]:
         deps.trace("run_error", {"error": str(exc)})
         fail_reason = classify_agent_failure(exc)
         if fail_reason == "agent_step_limit":
-            # Step budget exhausted while probing workspace — do not block the plan.
+            # Fail-closed: step budget exhausted means validation did not complete.
             return {
-                "passed": True,
+                "passed": False,
                 "skipped": False,
                 "fail_reason": fail_reason,
                 "reason": f"validate agent hit step limit: {exc}",
                 "issues": [
                     {
-                        "severity": "warning",
+                        "severity": "blocker",
                         "type": "agent_step_limit",
                         "message": str(exc),
                     }
                 ],
-                "suggestions": ["Validate agent hit step limit; mechanical plan checks still apply."],
+                "suggestions": [
+                    "Validate agent hit step limit; revise the node or raise PE agent step budget."
+                ],
                 "model": cfg["model"],
                 "executor": "pydantic-ai",
             }

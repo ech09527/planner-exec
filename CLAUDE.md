@@ -13,8 +13,8 @@
 ## 推荐流程
 
 ```
-planner_plan(plan={goal, goal_confirmed, phases, dags})
-→ planner_run(task_id)
+planner_plan(plan={goal, goal_confirmed, phases, dags})  # 含 dag_eval；失败则 ready_for_run=false
+→ planner_run(task_id)  # dag_eval 闸门 → node_eval → execute → mechanical verify
 → [blocked] planner_replan → planner_replan(patches=...) → planner_run
 ```
 
@@ -38,7 +38,7 @@ planner_plan(plan={goal, goal_confirmed, phases, dags})
 1. 只记 `task_id` + summary 一行。
 2. 轮询用 `planner_status`；`query_logs` 禁止 `detail=true`。
 3. 失败走 `planner_replan`，不要整包重 `plan`。
-4. `planner_run` 必先 LLM eval 再 execute，不可跳过。
+4. `planner_plan` 含整图 `dag_eval`；`planner_run` 再过闸门后才 node eval + execute。
 5. `init` / `save` 在 `PE_MCP_OBSERVE_TOOLS=1` 下可用。
 6. Host 规划手册：`.cursor/skills/planner-exec/SKILL.md`。
 

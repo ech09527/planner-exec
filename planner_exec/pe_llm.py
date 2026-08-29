@@ -130,6 +130,12 @@ def evaluate_node_with_llm(context: dict[str, Any]) -> dict[str, Any]:
     return evaluate_node_with_agent(context)
 
 
+def evaluate_dag_with_llm(context: dict[str, Any]) -> dict[str, Any]:
+    from .pe_agent import evaluate_dag_with_agent
+
+    return evaluate_dag_with_agent(context)
+
+
 def execute_node_with_llm(context: dict[str, Any]) -> dict[str, Any]:
     from .pe_agent import execute_node_with_agent
 

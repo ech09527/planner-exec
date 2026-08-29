@@ -6,6 +6,7 @@ from typing import Any
 
 from . import db
 from .pe_dag import dag_revision
+from .pe_dag_eval import invalidate_dag_eval
 from .pe_node import node_acceptance, node_dependencies
 from .pe_util import utc_now, validate_dag
 
@@ -27,9 +28,11 @@ def task_allows_patch(task_id: str) -> tuple[bool, str]:
         "failed",
         "incomplete",
         "eval_failed",
+        "dag_eval_failed",
         "execute_failed",
         "escalat",
         "phase_blocked",
+        "dag_patched",
     )
     if any(marker in status for marker in allowed_markers):
         return True, ""
@@ -156,6 +159,7 @@ def apply_node_patches(task_id: str, phase: int, patches: list[dict[str, Any]]) 
     now = utc_now()
     payload = {**base, "saved_at": now, "phase": phase, "dag_revision": rev}
     db.save_phase_dag(task_id, phase, rev, payload, now)
+    invalidate_dag_eval(task_id)
     db.update_task_meta(
         task_id,
         updated_at=now,
