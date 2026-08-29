@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from planner_exec import pe_cli as pe
 from planner_exec.pe_mcp import debug_tools_enabled, observe_tools_enabled
@@ -26,9 +27,24 @@ from planner_exec.pe_prompts import (
 
 
 def _run_pe(func, args) -> str:
+    """Run a pe_cli command and return stdout.
+
+    pe_cli uses SystemExit for validation/business errors (CLI heritage). Raising
+    SystemExit inside an MCP tool crashes the stdio TaskGroup — convert to ToolError
+    so the Host gets is_error=True with a readable message instead of a hang/timeout.
+    """
     buf = io.StringIO()
-    with redirect_stdout(buf):
-        func(args)
+    try:
+        with redirect_stdout(buf):
+            func(args)
+    except SystemExit as exc:
+        code = exc.code
+        if isinstance(code, int) and code == 0:
+            return buf.getvalue().strip()
+        msg = code if isinstance(code, str) else (str(code) if code is not None else "command failed")
+        if not msg.startswith("ERROR"):
+            msg = f"ERROR: {msg}"
+        raise ToolError(msg) from exc
     return buf.getvalue().strip()
 
 

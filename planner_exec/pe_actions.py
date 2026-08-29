@@ -41,11 +41,24 @@ def apply_actions(
             if not cmd:
                 results.append({"ok": False, "type": typ, "error": "empty command"})
                 continue
+            raw_timeout = action.get("timeout", 120)
+            try:
+                timeout = int(raw_timeout)
+            except (TypeError, ValueError):
+                results.append(
+                    {
+                        "ok": False,
+                        "type": typ,
+                        "command": cmd,
+                        "error": f"invalid timeout value: {raw_timeout!r}",
+                    }
+                )
+                continue
             results.append(
                 run_guarded_shell(
                     str(root),
                     cmd,
-                    timeout=int(action.get("timeout", 120)),
+                    timeout=timeout,
                     dry_run=dry_run,
                 )
             )

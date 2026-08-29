@@ -229,6 +229,23 @@ def run_guarded_shell(
     if not root or not root.exists():
         return {"ok": False, "type": "run_shell", "command": command, "error": f"workspace not found: {workspace}"}
 
+    try:
+        timeout_s = int(timeout)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "type": "run_shell",
+            "command": command,
+            "error": f"invalid timeout value: {timeout!r}",
+        }
+    if timeout_s <= 0:
+        return {
+            "ok": False,
+            "type": "run_shell",
+            "command": command,
+            "error": f"timeout must be positive, got {timeout_s}",
+        }
+
     guard = guard_command(command, mode=shell_mode)
     if not guard.allowed:
         return {
@@ -248,14 +265,38 @@ def run_guarded_shell(
             "guard": guard.to_dict(),
         }
 
-    proc = subprocess.run(
-        command,
-        shell=True,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+        return {
+            "ok": False,
+            "type": "run_shell",
+            "command": command,
+            "exit_code": None,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+            "error": f"command timed out after {timeout_s}s",
+            "timed_out": True,
+            "guard": guard.to_dict(),
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "type": "run_shell",
+            "command": command,
+            "error": f"failed to start command: {exc}",
+            "guard": guard.to_dict(),
+        }
+
     return {
         "ok": proc.returncode == 0,
         "type": "run_shell",
@@ -264,4 +305,5 @@ def run_guarded_shell(
         "stdout": proc.stdout[-4000:],
         "stderr": proc.stderr[-4000:],
         "guard": guard.to_dict(),
+        "error": None if proc.returncode == 0 else f"exit {proc.returncode}",
     }

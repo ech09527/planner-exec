@@ -23,7 +23,16 @@ def _check_file_exists(workspace: str | None, spec: dict[str, Any]) -> dict[str,
 def _check_shell(workspace: str | None, spec: dict[str, Any]) -> dict[str, Any]:
     cmd = spec.get("command", "")
     expect = int(spec.get("expect_exit", 0))
-    timeout = int(spec.get("timeout", 120))
+    raw_timeout = spec.get("timeout", 120)
+    try:
+        timeout = int(raw_timeout)
+    except (TypeError, ValueError):
+        return {
+            "type": "shell",
+            "command": cmd,
+            "passed": False,
+            "error": f"invalid timeout value: {raw_timeout!r}",
+        }
     if not cmd:
         return {"type": "shell", "command": cmd, "passed": False, "error": "empty command"}
 
@@ -34,6 +43,18 @@ def _check_shell(workspace: str | None, spec: dict[str, Any]) -> dict[str, Any]:
             "command": cmd,
             "passed": False,
             "error": rec.get("error"),
+            "guard": rec.get("guard"),
+        }
+
+    if rec.get("timed_out"):
+        return {
+            "type": "shell",
+            "command": cmd,
+            "passed": False,
+            "timed_out": True,
+            "error": rec.get("error") or "command timed out",
+            "stdout": rec.get("stdout", "")[-2000:],
+            "stderr": rec.get("stderr", "")[-2000:],
             "guard": rec.get("guard"),
         }
 
@@ -48,7 +69,7 @@ def _check_shell(workspace: str | None, spec: dict[str, Any]) -> dict[str, Any]:
         "stdout": rec.get("stdout", "")[-2000:],
         "stderr": rec.get("stderr", "")[-2000:],
         "guard": rec.get("guard"),
-        "error": None if ok else f"exit {exit_code} != {expect}",
+        "error": None if ok else (rec.get("error") or f"exit {exit_code} != {expect}"),
     }
 
 

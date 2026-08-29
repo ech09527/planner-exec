@@ -279,26 +279,39 @@ def _register_write_tools(agent: Agent[AgentDeps, Any]) -> None:
         if stop:
             ctx.deps.trace("tool", {"tool": "run_shell", "command": command, "ok": False, "error": stop, "repeat_stop": True})
             return stop
+        try:
+            timeout_s = int(timeout)
+        except (TypeError, ValueError):
+            err = f"invalid timeout value: {timeout!r} (expected int seconds)"
+            ctx.deps.trace(
+                "tool",
+                {"tool": "run_shell", "command": command, "ok": False, "error": err, "timeout_arg": timeout},
+            )
+            return f"ERROR: {err}"
         results = apply_actions(
-            [{"type": "run_shell", "command": command, "timeout": timeout}],
+            [{"type": "run_shell", "command": command, "timeout": timeout_s}],
             ctx.deps.workspace,
         )
         ctx.deps.action_log.extend(results)
         rec = results[0] if results else {"ok": False, "error": "no result"}
         guard = rec.get("guard") or {}
+        err = rec.get("error")
+        if not err and not rec.get("ok"):
+            err = (rec.get("stderr") or "")[:200] or "command failed"
         ctx.deps.trace(
             "tool",
             {
                 "tool": "run_shell",
                 "command": command,
                 "ok": rec.get("ok"),
+                "error": err,
+                "timed_out": bool(rec.get("timed_out")),
                 "guard_level": guard.get("level"),
                 "guard_source": guard.get("source"),
                 "result": rec,
             },
         )
         if not rec.get("ok"):
-            err = rec.get("error") or "command failed"
             return (
                 f"ERROR: {err}\n"
                 f"EXIT {rec.get('exit_code')}\n"

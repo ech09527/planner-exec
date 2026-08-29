@@ -937,9 +937,19 @@ def query_task_logs(
                 summary = f"[{row['agent_role']}] step {row['step']}: {row['event_type']}"
                 trace_meta = None
                 if row["event_type"] == "tool" and isinstance(data, dict):
-                    trace_meta = {"tool": data.get("tool"), "ok": data.get("ok"), "error": data.get("error")}
+                    err = data.get("error")
+                    if not err and isinstance(data.get("result"), dict):
+                        nested = data["result"]
+                        err = nested.get("error") or (nested.get("stderr") or "")[:120] or None
+                    trace_meta = {
+                        "tool": data.get("tool"),
+                        "ok": data.get("ok"),
+                        "error": err,
+                        "timed_out": data.get("timed_out")
+                        or (isinstance(data.get("result"), dict) and data["result"].get("timed_out")),
+                    }
                     if data.get("ok") is False:
-                        summary += f" — {data.get('tool')} failed: {(data.get('error') or '')[:120]}"
+                        summary += f" — {data.get('tool')} failed: {(err or '')[:120]}"
                 elif row["event_type"] == "run_end" and isinstance(data, dict):
                     trace_meta = {"status": data.get("status"), "summary": (data.get("summary") or "")[:200]}
                 entries.append(
