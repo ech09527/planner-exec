@@ -157,11 +157,12 @@ def apply_plan(
         skip_dag_llm = os.environ.get("PE_SKIP_DAG_LLM", "").lower() in ("1", "true", "yes")
 
     tid = task_id or make_task_id(plan["goal"])
+    # Evaluate before create_task — no task_id (FK would fail on agent_traces).
     dag_eval = evaluate_plan_dags(
         goal=plan.get("goal_confirmed"),
         phases_doc=plan["phases"],
         dags=dags,
-        task_id=None if validate_only else tid,
+        task_id=None,
         skip_llm=bool(skip_dag_llm),
     )
 
