@@ -255,15 +255,11 @@ def cmd_eval_node(args: argparse.Namespace) -> None:
 
     mechanical = validate_node_mechanical(node, nodes_by_id, phase_def)
 
-    llm_result: dict[str, Any]
-    if args.mechanical_only:
-        llm_result = {"passed": None, "skipped": True, "reason": "mechanical_only flag", "issues": [], "suggestions": []}
-    else:
-        context = build_node_eval_context(node, nodes_by_id, dag, phase_def, goal)
-        context["task_id"] = task_id
-        context["phase_number"] = args.phase
-        context["workspace"] = db.get_task_meta(task_id).get("workspace")
-        llm_result = evaluate_node_with_llm(context)
+    context = build_node_eval_context(node, nodes_by_id, dag, phase_def, goal)
+    context["task_id"] = task_id
+    context["phase_number"] = args.phase
+    context["workspace"] = db.get_task_meta(task_id).get("workspace")
+    llm_result = evaluate_node_with_llm(context)
 
     combined_issues = list(mechanical.get("issues", []))
     llm_passed: bool | None = llm_result.get("passed") if not llm_result.get("skipped") else None
@@ -283,8 +279,6 @@ def cmd_eval_node(args: argparse.Namespace) -> None:
     blocker_count = sum(1 for i in combined_issues if i.get("severity") == "blocker")
     if not mechanical.get("passed"):
         passed = False
-    elif args.mechanical_only:
-        passed = True
     elif llm_result.get("skipped"):
         passed = False
         combined_issues.append(
@@ -440,7 +434,7 @@ def cmd_eval_phase(args: argparse.Namespace) -> None:
             results.append({"node_id": nid, "passed": True, "cached": True})
             continue
         results.append(
-            internal_eval_node(task_id, args.phase, nid, mechanical_only=args.mechanical_only, force=args.force)
+            internal_eval_node(task_id, args.phase, nid, force=args.force)
         )
     all_passed = all(r.get("passed") for r in results)
     print(json.dumps({"task_id": task_id, "phase": args.phase, "all_passed": all_passed, "nodes": results}, ensure_ascii=False, indent=2))
@@ -464,8 +458,6 @@ def cmd_run_phase(args: argparse.Namespace) -> None:
     result = internal_run_phase(
         task_id,
         args.phase,
-        mechanical_only=args.mechanical_only,
-        skip_eval=args.skip_eval,
     )
     payload = slim_phase_result(result, include_steps=args.include_steps)
     emit_json_response(
@@ -491,8 +483,6 @@ def cmd_run_task(args: argparse.Namespace) -> None:
         result = internal_run_phase(
             task_id,
             idx,
-            mechanical_only=args.mechanical_only,
-            skip_eval=args.skip_eval,
         )
         results.append({"phase": idx, **result})
         if result.get("status") != "completed":
@@ -751,7 +741,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--phase", type=int, required=True)
     p_eval.add_argument("--node", required=True, help="DAG node id")
     p_eval.add_argument("--iteration", type=int, help="Explicit iteration number")
-    p_eval.add_argument("--mechanical-only", action="store_true", help="Skip LLM evaluation")
     p_eval.add_argument("--force", action="store_true", help="Allow eval beyond max iterations")
     p_eval.set_defaults(func=cmd_eval_node)
 
@@ -764,7 +753,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval_phase.add_argument("--task-id", required=True)
     p_eval_phase.add_argument("--phase", type=int, required=True)
     p_eval_phase.add_argument("--node", help="Evaluate only one node")
-    p_eval_phase.add_argument("--mechanical-only", action="store_true")
     p_eval_phase.add_argument("--force", action="store_true", help="Re-eval even if passed")
     p_eval_phase.set_defaults(func=cmd_eval_phase)
 
@@ -784,8 +772,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_unified.add_argument("--task-id", required=True)
     p_run_unified.add_argument("--phase", type=int, help="If set, run only this phase")
     p_run_unified.add_argument("--from-phase", type=int, default=1, help="Start from phase N (task run only)")
-    p_run_unified.add_argument("--skip-eval", action="store_true")
-    p_run_unified.add_argument("--mechanical-only", action="store_true")
     p_run_unified.add_argument("--include-steps", action="store_true", help="Include steps[] (single phase)")
     p_run_unified.add_argument("--include-phases", action="store_true", help="Include phases[] (full task)")
     p_run_unified.set_defaults(func=cmd_run)
@@ -793,8 +779,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run-phase", help="[legacy] Use run --phase N")
     p_run.add_argument("--task-id", required=True)
     p_run.add_argument("--phase", type=int, required=True)
-    p_run.add_argument("--skip-eval", action="store_true")
-    p_run.add_argument("--mechanical-only", action="store_true")
     p_run.add_argument(
         "--include-steps",
         action="store_true",
@@ -805,8 +789,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_task = sub.add_parser("run-task", help="[legacy] Use run without --phase")
     p_run_task.add_argument("--task-id", required=True)
     p_run_task.add_argument("--from-phase", type=int, default=1, help="Start from phase N")
-    p_run_task.add_argument("--skip-eval", action="store_true")
-    p_run_task.add_argument("--mechanical-only", action="store_true")
     p_run_task.add_argument(
         "--include-phases",
         action="store_true",

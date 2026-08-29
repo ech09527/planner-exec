@@ -163,7 +163,7 @@ def plan_design_guide_text() -> str:
 
 ## 六、提交后
 - planner_plan 只记 task_id + summary；勿在对话复述 nodes[] 全文
-- 节点 ≥3 或多 phase：planner_run(task_id, mechanical_only=true)
+- planner_run 必先 LLM eval 再 execute（不可跳过）
 - blocked：planner_replan → patch → run；勿整包重 plan
 """.strip()
 
@@ -203,7 +203,7 @@ def replan_guide_text() -> str:
 - 禁止 detail=true（token 爆炸）
 
 ## 常见修复
-- eval 因「文件不存在」失败 → 改 description 为将来动作；或 run 时用 mechanical_only=true
-- execute 步数耗尽 → 简化单节点 checks；集成放最后节点
+- eval 因「文件不存在」失败 → 改 description 为将来动作（eval 在 execute 前，产物未创建是正常的）
+- execute 步数耗尽 → 简化单节点 checks；集成放最后节点；description 写明「写完即停」
 - cross-phase reads_from → 删掉，改 phases.inputs 描述依赖
 """.strip()

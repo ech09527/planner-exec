@@ -44,5 +44,6 @@ def test_prompt_text_helpers_non_empty():
 
 def test_server_instructions_reference_prompts():
     assert "plan-design-guide" in SERVER_INSTRUCTIONS
-    assert "mechanical_only" in SERVER_INSTRUCTIONS
     assert "reads_from" in SERVER_INSTRUCTIONS
+    assert "mechanical_only" not in SERVER_INSTRUCTIONS
+    assert "skip_eval" not in SERVER_INSTRUCTIONS

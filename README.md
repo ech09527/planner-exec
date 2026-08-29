@@ -83,6 +83,10 @@ Prompt **不会**自动注入，规划前需 `prompts/get`（或在 Host UI 选�
 
 `SERVER_INSTRUCTIONS` 含硬约束与流程；详细指南在上表 Prompt 中。
 
+## Cursor Skill
+
+项目内 [`.cursor/skills/planner-exec/SKILL.md`](.cursor/skills/planner-exec/SKILL.md) 供 Host Agent 规划时加载（工作流、硬约束、blocked 速查）。
+
 ## Host 契约
 
 项目根目录 [`CLAUDE.md`](CLAUDE.md) 含主 Agent token 规则。架构详见 [`docs/token-budget.md`](docs/token-budget.md)。

@@ -43,8 +43,8 @@ blocked：planner_replan（无 patches 拿包）→ replan(patches=...) → run
 - reads_from 仅同 phase 内 node id；跨 phase 用 phases.inputs/outputs
 - node description 写「执行阶段将做什么」，勿写 workspace 文件是否已存在
 - 集成 shell/unittest 放该 phase 最后一节点；中间节点优先 file_exists
-- planner_plan 后勿复述 nodes[]；≥3 节点或多 phase 用 mechanical_only=true
-- query_logs limit=20，勿 detail=true
+- planner_plan 后勿复述 nodes[]；query_logs limit=20，勿 detail=true
+- planner_run 必先 LLM eval 再 execute，不可跳过评估
 
 规划前 get prompt「plan-design-guide」；需要结构参考 get「plan-example-calc」；
 blocked 时 get「replan-guide」。init/save 仅在 PE_MCP_OBSERVE_TOOLS=1。
@@ -101,15 +101,13 @@ def planner_plan(
     name="planner_run",
     description=(
         "Run task (all phases) or single phase if phase is set. "
-        "Use mechanical_only=true for multi-node or multi-phase plans. Default slim response."
+        "Always evaluates every node (mechanical + LLM) before execute. Default slim response."
     ),
 )
 def planner_run(
     task_id: str,
     phase: int | None = None,
     from_phase: int = 1,
-    skip_eval: bool = False,
-    mechanical_only: bool = False,
     include_steps: bool = False,
     include_phases: bool = False,
 ) -> str:
@@ -117,8 +115,6 @@ def planner_run(
         task_id=task_id,
         phase=phase,
         from_phase=from_phase,
-        skip_eval=skip_eval,
-        mechanical_only=mechanical_only,
         include_steps=include_steps,
         include_phases=include_phases,
     )
@@ -289,16 +285,12 @@ def _register_observe_tools() -> None:
     def planner_run_task(
         task_id: str,
         from_phase: int = 1,
-        skip_eval: bool = False,
-        mechanical_only: bool = False,
         include_phases: bool = False,
     ) -> str:
         return planner_run(
             task_id,
             phase=None,
             from_phase=from_phase,
-            skip_eval=skip_eval,
-            mechanical_only=mechanical_only,
             include_phases=include_phases,
         )
 
@@ -306,15 +298,11 @@ def _register_observe_tools() -> None:
     def planner_run_phase(
         task_id: str,
         phase: int,
-        skip_eval: bool = False,
-        mechanical_only: bool = False,
         include_steps: bool = False,
     ) -> str:
         return planner_run(
             task_id,
             phase=phase,
-            skip_eval=skip_eval,
-            mechanical_only=mechanical_only,
             include_steps=include_steps,
         )
 
@@ -355,7 +343,6 @@ def _register_debug_tools() -> None:
         task_id: str,
         phase: int,
         node: str,
-        mechanical_only: bool = False,
         force: bool = False,
     ) -> str:
         return _run_pe(
@@ -365,7 +352,6 @@ def _register_debug_tools() -> None:
                 phase=phase,
                 node=node,
                 iteration=None,
-                mechanical_only=mechanical_only,
                 force=force,
             ),
         )
@@ -375,7 +361,6 @@ def _register_debug_tools() -> None:
         task_id: str,
         phase: int,
         node: str | None = None,
-        mechanical_only: bool = False,
         force: bool = False,
     ) -> str:
         return _run_pe(
@@ -384,7 +369,6 @@ def _register_debug_tools() -> None:
                 task_id=task_id,
                 phase=phase,
                 node=node,
-                mechanical_only=mechanical_only,
                 force=force,
             ),
         )

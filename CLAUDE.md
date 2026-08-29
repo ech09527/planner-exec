@@ -38,6 +38,8 @@ planner_plan(plan={goal, goal_confirmed, phases, dags})
 1. 只记 `task_id` + summary 一行。
 2. 轮询用 `planner_status`；`query_logs` 禁止 `detail=true`。
 3. 失败走 `planner_replan`，不要整包重 `plan`。
-4. `init` / `save` 在 `PE_MCP_OBSERVE_TOOLS=1` 下可用。
+4. `planner_run` 必先 LLM eval 再 execute，不可跳过。
+5. `init` / `save` 在 `PE_MCP_OBSERVE_TOOLS=1` 下可用。
+6. Host 规划手册：`.cursor/skills/planner-exec/SKILL.md`。
 
 详见 [`docs/token-budget.md`](docs/token-budget.md)。

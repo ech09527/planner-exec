@@ -93,8 +93,6 @@ def test_run_task_without_phases_exits(temp_db):
                 task_id=temp_db,
                 phase=None,
                 from_phase=1,
-                skip_eval=True,
-                mechanical_only=True,
                 include_steps=False,
                 include_phases=False,
             )

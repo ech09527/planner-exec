@@ -129,7 +129,6 @@ def internal_eval_node(
     task_id: str,
     phase: int,
     node_id: str,
-    mechanical_only: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     meta = db.get_task_meta(task_id)
@@ -151,16 +150,13 @@ def internal_eval_node(
     goal = db.get_artifact(task_id, "goal-confirmed")
     mechanical = validate_node_mechanical(node, nodes_by_id, phase_def)
 
-    if mechanical_only:
-        llm_result = {"passed": None, "skipped": True, "reason": "mechanical_only", "issues": [], "suggestions": []}
-    else:
-        context = build_node_eval_context(node, nodes_by_id, dag, phase_def, goal)
-        context["task_id"] = task_id
-        context["phase_number"] = phase
-        meta = db.get_task_meta(task_id)
-        raw_goal = db.get_artifact(task_id, "goal-raw")
-        context["workspace"] = meta.get("workspace") or (raw_goal or {}).get("context", {}).get("workspace")
-        llm_result = evaluate_node_with_llm(context)
+    context = build_node_eval_context(node, nodes_by_id, dag, phase_def, goal)
+    context["task_id"] = task_id
+    context["phase_number"] = phase
+    meta = db.get_task_meta(task_id)
+    raw_goal = db.get_artifact(task_id, "goal-raw")
+    context["workspace"] = meta.get("workspace") or (raw_goal or {}).get("context", {}).get("workspace")
+    llm_result = evaluate_node_with_llm(context)
 
     combined_issues = list(mechanical.get("issues", []))
     llm_passed = llm_result.get("passed") if not llm_result.get("skipped") else None
@@ -178,8 +174,6 @@ def internal_eval_node(
 
     if not mechanical.get("passed"):
         passed = False
-    elif mechanical_only:
-        passed = True
     elif llm_result.get("skipped"):
         passed = False
         combined_issues.append(
@@ -493,7 +487,7 @@ def cmd_eval_phase(args: argparse.Namespace) -> None:
             results.append({"node_id": nid, "passed": True, "cached": True})
             continue
         results.append(
-            internal_eval_node(task_id, args.phase, nid, mechanical_only=args.mechanical_only, force=args.force)
+            internal_eval_node(task_id, args.phase, nid, force=args.force)
         )
     all_passed = all(r.get("passed") for r in results)
     print(json.dumps({"task_id": task_id, "phase": args.phase, "all_passed": all_passed, "nodes": results}, ensure_ascii=False, indent=2))
@@ -502,23 +496,20 @@ def cmd_eval_phase(args: argparse.Namespace) -> None:
 def internal_run_phase(
     task_id: str,
     phase: int,
-    mechanical_only: bool = False,
-    skip_eval: bool = False,
 ) -> dict[str, Any]:
     emit_progress(task_id, "phase_start", phase=phase, status="running")
 
-    if not skip_eval:
-        eval_result = eval_phase_internal(task_id, phase, mechanical_only)
-        if not eval_result["all_passed"]:
-            emit_progress(
-                task_id,
-                "phase_blocked",
-                phase=phase,
-                status="eval_failed",
-                message="node eval did not pass",
-            )
-            return {"status": "blocked", "stage": "eval", "task_id": task_id, "phase": phase, **eval_result}
-        emit_progress(task_id, "phase_eval_done", phase=phase, status="passed")
+    eval_result = eval_phase_internal(task_id, phase)
+    if not eval_result["all_passed"]:
+        emit_progress(
+            task_id,
+            "phase_blocked",
+            phase=phase,
+            status="eval_failed",
+            message="node eval did not pass",
+        )
+        return {"status": "blocked", "stage": "eval", "task_id": task_id, "phase": phase, **eval_result}
+    emit_progress(task_id, "phase_eval_done", phase=phase, status="passed")
 
     steps: list[dict[str, Any]] = []
     while True:
@@ -570,7 +561,7 @@ def internal_run_phase(
     }
 
 
-def eval_phase_internal(task_id: str, phase: int, mechanical_only: bool) -> dict[str, Any]:
+def eval_phase_internal(task_id: str, phase: int) -> dict[str, Any]:
     dag = db.get_phase_dag(task_id, phase)
     if not dag:
         return {"all_passed": False, "nodes": [], "error": "dag not found"}
@@ -582,5 +573,5 @@ def eval_phase_internal(task_id: str, phase: int, mechanical_only: bool) -> dict
         if latest and latest.get("passed"):
             results.append({"node_id": nid, "passed": True, "cached": True})
             continue
-        results.append(internal_eval_node(task_id, phase, nid, mechanical_only=mechanical_only))
+        results.append(internal_eval_node(task_id, phase, nid))
     return {"all_passed": all(r.get("passed") for r in results), "nodes": results}
